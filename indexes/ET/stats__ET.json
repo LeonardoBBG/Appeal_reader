@@ -1,0 +1,22 @@
+{
+  "mode": "ET",
+  "pdf_root": "/media/hello/Tribunals/ET_Cases",
+  "total_pdfs": 127755,
+  "text_ok": 127754,
+  "text_fail": 1,
+  "hits": {
+    "UNFAIR_DISMISSAL": 27729,
+    "CONSTRUCTIVE_DISMISSAL": 1441,
+    "WRONGFUL_DISMISSAL": 3339,
+    "WHISTLEBLOWING_PIDA": 2977,
+    "DISCRIMINATION": 20812,
+    "REDUNDANCY": 10382,
+    "TUPE": 1083
+  },
+  "first_n_pages": 2,
+  "max_workers": 48,
+  "labels_path": "/home/hello/Appeal_reader/indexes/ET/labels__ET.jsonl",
+  "fails_path": "/home/hello/Appeal_reader/indexes/ET/failures__ET.jsonl",
+  "cache_path": "/home/hello/Appeal_reader/indexes/ET/cache__ET.json",
+  "elapsed_s": 28.51
+}

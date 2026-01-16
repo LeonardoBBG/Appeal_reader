@@ -1,0 +1,22 @@
+{
+  "mode": "EAT",
+  "pdf_root": "/media/hello/Tribunals/EAT_Appeals",
+  "total_pdfs": 2483,
+  "text_ok": 2482,
+  "text_fail": 1,
+  "hits": {
+    "UNFAIR_DISMISSAL": 191,
+    "CONSTRUCTIVE_DISMISSAL": 19,
+    "WRONGFUL_DISMISSAL": 19,
+    "WHISTLEBLOWING_PIDA": 60,
+    "DISCRIMINATION": 356,
+    "REDUNDANCY": 49,
+    "TUPE": 14
+  },
+  "first_n_pages": 2,
+  "max_workers": 48,
+  "labels_path": "/home/hello/Appeal_reader/indexes/EAT/labels__EAT.jsonl",
+  "fails_path": "/home/hello/Appeal_reader/indexes/EAT/failures__EAT.jsonl",
+  "cache_path": "/home/hello/Appeal_reader/indexes/EAT/cache__EAT.json",
+  "elapsed_s": 1.7
+}
