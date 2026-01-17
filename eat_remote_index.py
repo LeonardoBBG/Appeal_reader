@@ -3,20 +3,28 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, quote
-import tqdm 
 
 import requests
+import tqdm
 
 
 # -----------------------------
 # HTTP client (robust-ish)
 # -----------------------------
 class HttpClient:
+    """
+    Same public API as before, but now uses a thread-local requests.Session
+    so it's safe + stable under ThreadPoolExecutor fan-out.
+    """
+
     def __init__(
         self,
         *,
@@ -30,8 +38,18 @@ class HttpClient:
         self.max_retries = max_retries
         self.backoff_base = backoff_base
         self.min_delay = min_delay
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": user_agent})
+        self.user_agent = user_agent
+
+        # Thread-local storage for per-thread sessions
+        self._local = threading.local()
+
+    def _get_session(self) -> requests.Session:
+        sess = getattr(self._local, "session", None)
+        if sess is None:
+            sess = requests.Session()
+            sess.headers.update({"User-Agent": self.user_agent})
+            self._local.session = sess
+        return sess
 
     def _sleep_polite(self) -> None:
         if self.min_delay > 0:
@@ -39,10 +57,12 @@ class HttpClient:
 
     def get_json(self, url: str) -> Dict[str, Any]:
         last_exc: Optional[Exception] = None
+        sess = self._get_session()
+
         for attempt in range(self.max_retries + 1):
             try:
                 self._sleep_polite()
-                resp = self.session.get(url, timeout=self.timeout)
+                resp = sess.get(url, timeout=self.timeout)
                 if resp.status_code in (429, 500, 502, 503, 504):
                     raise requests.HTTPError(f"GET {url} -> {resp.status_code}", response=resp)
                 resp.raise_for_status()
@@ -56,10 +76,12 @@ class HttpClient:
 
     def head(self, url: str) -> requests.Response:
         last_exc: Optional[Exception] = None
+        sess = self._get_session()
+
         for attempt in range(self.max_retries + 1):
             try:
                 self._sleep_polite()
-                resp = self.session.head(url, timeout=self.timeout, allow_redirects=True)
+                resp = sess.head(url, timeout=self.timeout, allow_redirects=True)
                 if resp.status_code in (429, 500, 502, 503, 504):
                     raise requests.HTTPError(f"HEAD {url} -> {resp.status_code}", response=resp)
                 resp.raise_for_status()
@@ -70,6 +92,7 @@ class HttpClient:
                     # Don't hard-fail the whole run on HEAD issues
                     return _dummy_head_response(url, error=str(e))
                 time.sleep(self.backoff_base * (2 ** attempt))
+
         return _dummy_head_response(url, error=str(last_exc))
 
 
@@ -90,6 +113,7 @@ def _safe_int(x: Optional[str]) -> Optional[int]:
     except Exception:
         return None
 
+
 def iter_search_results_with_tqdm(
     client: HttpClient,
     *,
@@ -105,8 +129,9 @@ def iter_search_results_with_tqdm(
       - employment_tribunal_decision (ET)
     """
     try:
-        from tqdm.auto import tqdm
+        from tqdm.auto import tqdm  # type: ignore
     except Exception:
+
         def tqdm(x, **kwargs):
             return x
 
@@ -154,6 +179,7 @@ def iter_search_results_with_tqdm(
     if pbar:
         pbar.close()
 
+
 # -----------------------------
 # Data model
 # -----------------------------
@@ -193,9 +219,10 @@ def _pick_pdf_from_content_api(content: Dict[str, Any]) -> Optional[str]:
     Content API payload can include attachments in different structures across formats.
     We keep it defensive and just hunt for the first .pdf URL.
     """
+
     def walk(o: Any) -> Iterable[str]:
         if isinstance(o, dict):
-            for k, v in o.items():
+            for _, v in o.items():
                 if isinstance(v, (dict, list)):
                     yield from walk(v)
                 elif isinstance(v, str):
@@ -213,7 +240,6 @@ def _pick_pdf_from_content_api(content: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-
 def build_remote_index_v2(
     client: HttpClient,
     *,
@@ -223,13 +249,37 @@ def build_remote_index_v2(
 ) -> Dict[str, Dict[str, Any]]:
     """
     Builds slug-keyed index via Search API + Content API.
+
+    Same function name + I/O as before.
+    Internally, it now parallelises per-result Content API GET (and optional HEAD)
+    using a ThreadPoolExecutor, while keeping Search API pagination sequential.
     """
     out: Dict[str, Dict[str, Any]] = {}
 
-    for i, r in enumerate(iter_search_results_with_tqdm(client, max_items=max_items), start=1):
+    # Thread count: override without changing function signature.
+    # Keep it conservative by default to reduce 429 risk.
+    max_workers = _env_int("EAT_INDEX_MAX_WORKERS", default=16)
+    max_workers = max(1, min(max_workers, 64))
+
+    # Per-page size for Search API. Keep same default behaviour as common usage.
+    page_size = 200
+
+    try:
+        from tqdm.auto import tqdm  # type: ignore
+    except Exception:
+
+        def tqdm(x, **kwargs):
+            return x
+
+    yielded = 0
+    start = 0
+    pbar = None
+
+    def _build_one(r: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
         link = r.get("link")  # usually "/employment-appeal-tribunal-decisions/<slug>"
         if not link:
-            continue
+            return None
+
         decision_url = urljoin(GOVUK, link)
         slug = _slug_from_decision_page(decision_url)
 
@@ -264,12 +314,68 @@ def build_remote_index_v2(
                 rec.pdf_content_length = _safe_int(h.headers.get("Content-Length"))
                 rec.head_error = h.headers.get("x-head-error")
 
-        out[slug] = dataclasses.asdict(rec)
+        return slug, dataclasses.asdict(rec)
 
-        if i % 100 == 0:
-            print(f"[remote] processed {i} decisions...")
+    while True:
+        # Sequential Search API page fetch
+        url = (
+            f"{GOVUK}/api/search.json"
+            f"?filter_document_type={DOC_TYPE}"
+            f"&order=-public_timestamp"
+            f"&count={page_size}"
+            f"&start={start}"
+        )
+        payload = client.get_json(url)
+        results = payload.get("results") or []
+        if not results:
+            break
+
+        if pbar is None:
+            total = payload.get("total")
+            pbar = tqdm(total=total, desc=f"Indexing {DOC_TYPE}", unit="doc")
+
+        # Fan-out this page: content GET + optional HEAD per result
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(_build_one, r) for r in results]
+
+            for fut in as_completed(futures):
+                item = fut.result()
+                if item is not None:
+                    slug, rec = item
+                    out[slug] = rec
+
+                yielded += 1
+                if pbar:
+                    pbar.update(1)
+
+                if max_items is not None and yielded >= max_items:
+                    if pbar:
+                        pbar.close()
+                    return out
+
+        if yielded and (yielded % 100 == 0):
+            print(f"[remote] processed {yielded} decisions...")
+
+        start += len(results)
+
+        total = payload.get("total")
+        if isinstance(total, int) and start >= total:
+            break
+
+    if pbar:
+        pbar.close()
 
     return out
+
+
+def _env_int(name: str, default: int) -> int:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except Exception:
+        return default
 
 
 # -----------------------------
