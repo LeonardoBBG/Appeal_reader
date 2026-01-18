@@ -14,9 +14,9 @@
     "TUPE": 14
   },
   "first_n_pages": 2,
-  "max_workers": 48,
+  "max_workers": 16,
   "labels_path": "/home/hello/Appeal_reader/indexes/EAT/labels__EAT.jsonl",
   "fails_path": "/home/hello/Appeal_reader/indexes/EAT/failures__EAT.jsonl",
   "cache_path": "/home/hello/Appeal_reader/indexes/EAT/cache__EAT.json",
-  "elapsed_s": 0.52
+  "elapsed_s": 0.03
 }
