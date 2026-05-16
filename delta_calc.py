@@ -1,11 +1,8 @@
-# -----------------------------
-# Local PDF index + delta utils
-# -----------------------------
-from pathlib import Path
 import hashlib
-from typing import Dict, Any, Optional
-import json
 from pathlib import Path
+from typing import Any, Dict
+
+from json_utils import write_json
 
 
 def scan_local_pdfs(
@@ -52,12 +49,6 @@ def scan_local_pdfs(
 
     return out
 
-
-def write_json(path: Path, obj):
-    path = Path(path).resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
 
 def compute_delta(
     remote_index: Dict[str, Dict[str, Any]],

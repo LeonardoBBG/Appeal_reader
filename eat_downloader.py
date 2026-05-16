@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shutil
 import time
 from dataclasses import dataclass
@@ -9,6 +8,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+from json_utils import load_json, write_json_atomic
 
 
 try:
@@ -66,24 +67,10 @@ def _archive_existing(local_path: Path, archive_dir: Path, slug: str) -> Optiona
     return archived_path
 
 
-def _load_json(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write_json_atomic(path: Path, obj: Any) -> None:
-    path = path.resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
-
-
 def build_download_plan(delta: Dict[str, Any]) -> List[Tuple[str, str, str, str]]:
     """
     Returns list of tuples: (kind, slug, filename, url)
-    kind ∈ {"missing","changed"}
+    kind in {"missing", "changed"}
     """
     plan: List[Tuple[str, str, str, str]] = []
 
@@ -131,7 +118,7 @@ def download_missing_and_changed(
     archive_dir = (eat_dir / archive_subdir).resolve()
 
     # Resume state
-    results = _load_json(checkpoint_path) or {"downloaded": [], "archived": [], "failed": []}
+    results = load_json(checkpoint_path, default={}) or {"downloaded": [], "archived": [], "failed": []}
     if "downloaded" not in results:
         results["downloaded"] = []
     if "archived" not in results:
@@ -146,7 +133,7 @@ def download_missing_and_changed(
         plan = plan[:max_items]
 
     # tqdm total reflects planned actions (files)
-    pbar = tqdm(plan, desc="Downloading EAT PDFs", unit="file", total=len(plan))
+    pbar = tqdm(plan, desc="Downloading PDFs", unit="file", total=len(plan))
 
     for kind, slug, filename, url in pbar:
         if filename in already_done:
@@ -159,11 +146,11 @@ def download_missing_and_changed(
                 archived = _archive_existing(dest, archive_dir, slug)
                 if archived:
                     results["archived"].append(str(archived))
-                    _write_json_atomic(checkpoint_path, results)
+                    write_json_atomic(checkpoint_path, results)
 
             _download_file(url, dest, cfg)
             results["downloaded"].append(str(dest))
-            _write_json_atomic(checkpoint_path, results)
+            write_json_atomic(checkpoint_path, results)
 
             already_done.add(filename)
 
@@ -177,6 +164,6 @@ def download_missing_and_changed(
                     "error": str(e),
                 }
             )
-            _write_json_atomic(checkpoint_path, results)
+            write_json_atomic(checkpoint_path, results)
 
     return results

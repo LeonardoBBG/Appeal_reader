@@ -10,10 +10,14 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+.ipynb_checkpoints/
 
 data/
 outputs/
 
 # --- Generated indexes/manifests (DO NOT COMMIT) ---
 indexes/**/cache*.json
+indexes/**/cache*.tmp
 manifests/**/remote_index*.json
+manifests/**/*.json.tmp
+*.part

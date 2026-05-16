@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
-import json
 import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse, quote
+from typing import Any, Dict, Iterable, Optional, Tuple
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
-import tqdm
+
+from json_utils import write_json, write_json_atomic
 
 
 # -----------------------------
@@ -142,8 +141,8 @@ def iter_search_results_with_tqdm(
     while True:
         url = (
             f"{GOVUK}/api/search.json"
-            f"?filter_document_type={doc_type}"
-            f"&order={order}"
+            f"?filter_document_type={quote(doc_type)}"
+            f"&order={quote(order)}"
             f"&count={count}"
             f"&start={start}"
         )
@@ -206,12 +205,33 @@ class RemoteDecision:
 GOVUK = "https://www.gov.uk"
 SEARCH_API = f"{GOVUK}/api/search.json"
 DOC_TYPE = "employment_appeal_tribunal_decision"
+GOVUK_DECISION_CONFIGS = {
+    "EAT": {
+        "doc_type": "employment_appeal_tribunal_decision",
+        "base_path": "/employment-appeal-tribunal-decisions/",
+        "out_name": "remote_index_eat.json",
+    },
+    "ET": {
+        "doc_type": "employment_tribunal_decision",
+        "base_path": "/employment-tribunal-decisions/",
+        "out_name": "remote_index_et.json",
+    },
+}
 
 
-def _slug_from_decision_page(url: str) -> str:
-    # https://www.gov.uk/employment-appeal-tribunal-decisions/<slug>
+def get_decision_config(mode: str) -> Dict[str, str]:
+    mode = mode.upper()
+    if mode not in GOVUK_DECISION_CONFIGS:
+        raise ValueError("mode must be 'EAT' or 'ET'")
+    return GOVUK_DECISION_CONFIGS[mode]
+
+
+def _slug_from_decision_page(
+    url: str,
+    base_path: str = "/employment-appeal-tribunal-decisions/",
+) -> str:
     path = urlparse(url).path.rstrip("/")
-    return path.split("/employment-appeal-tribunal-decisions/")[-1].strip("/")
+    return path.split(base_path)[-1].strip("/")
 
 
 def _pick_pdf_from_content_api(content: Dict[str, Any]) -> Optional[str]:
@@ -240,29 +260,36 @@ def _pick_pdf_from_content_api(content: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def build_remote_index_v2(
+def build_remote_index(
     client: HttpClient,
     *,
+    mode: str = "EAT",
     do_head: bool = True,
     head_only_assets: bool = True,
     max_items: Optional[int] = None,
+    max_workers: Optional[int] = None,
+    page_size: int = 200,
+    existing_index: Optional[Dict[str, Dict[str, Any]]] = None,
+    checkpoint_path: str | Path | None = None,
+    checkpoint_every: int = 200,
 ) -> Dict[str, Dict[str, Any]]:
     """
-    Builds slug-keyed index via Search API + Content API.
+    Build a slug-keyed GOV.UK decision index via Search API + Content API.
 
-    Same function name + I/O as before.
-    Internally, it now parallelises per-result Content API GET (and optional HEAD)
-    using a ThreadPoolExecutor, while keeping Search API pagination sequential.
+    Supports EAT and ET; per-result Content API GET and optional PDF HEAD
+    requests run in a thread pool, while Search API pagination stays sequential.
     """
-    out: Dict[str, Dict[str, Any]] = {}
+    mode = mode.upper()
+    court_cfg = get_decision_config(mode)
+    doc_type = court_cfg["doc_type"]
+    base_path = court_cfg["base_path"]
+    out: Dict[str, Dict[str, Any]] = dict(existing_index or {})
+    existing_slugs = set(out)
 
-    # Thread count: override without changing function signature.
-    # Keep it conservative by default to reduce 429 risk.
-    max_workers = _env_int("EAT_INDEX_MAX_WORKERS", default=16)
+    if max_workers is None:
+        env_name = f"{mode}_INDEX_MAX_WORKERS"
+        max_workers = _env_int(env_name, default=_env_int("EAT_INDEX_MAX_WORKERS", default=16))
     max_workers = max(1, min(max_workers, 64))
-
-    # Per-page size for Search API. Keep same default behaviour as common usage.
-    page_size = 200
 
     try:
         from tqdm.auto import tqdm  # type: ignore
@@ -272,24 +299,25 @@ def build_remote_index_v2(
             return x
 
     yielded = 0
+    changed_since_checkpoint = 0
     start = 0
     pbar = None
 
     def _build_one(r: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
-        link = r.get("link")  # usually "/employment-appeal-tribunal-decisions/<slug>"
+        link = r.get("link")
         if not link:
             return None
 
         decision_url = urljoin(GOVUK, link)
-        slug = _slug_from_decision_page(decision_url)
+        slug = _slug_from_decision_page(decision_url, base_path)
+        if slug in existing_slugs:
+            return None
 
-        # Pull richer metadata (attachments, exact fields) from Content API
         content_url = urljoin(GOVUK, "/api/content" + link)
         content = client.get_json(content_url)
 
         title = (content.get("title") or r.get("title") or "").strip()
 
-        # Dates: keep both if present; formats can vary, so we store raw strings
         published_date = content.get("public_updated_at") or r.get("public_timestamp")
         decision_date = None
 
@@ -317,11 +345,10 @@ def build_remote_index_v2(
         return slug, dataclasses.asdict(rec)
 
     while True:
-        # Sequential Search API page fetch
         url = (
             f"{GOVUK}/api/search.json"
-            f"?filter_document_type={DOC_TYPE}"
-            f"&order=-public_timestamp"
+            f"?filter_document_type={quote(doc_type)}"
+            f"&order={quote('-public_timestamp')}"
             f"&count={page_size}"
             f"&start={start}"
         )
@@ -332,9 +359,8 @@ def build_remote_index_v2(
 
         if pbar is None:
             total = payload.get("total")
-            pbar = tqdm(total=total, desc=f"Indexing {DOC_TYPE}", unit="doc")
+            pbar = tqdm(total=total, desc=f"Indexing {mode}", unit="doc")
 
-        # Fan-out this page: content GET + optional HEAD per result
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(_build_one, r) for r in results]
 
@@ -343,6 +369,11 @@ def build_remote_index_v2(
                 if item is not None:
                     slug, rec = item
                     out[slug] = rec
+                    changed_since_checkpoint += 1
+
+                    if checkpoint_path and changed_since_checkpoint >= checkpoint_every:
+                        write_json_atomic(checkpoint_path, out)
+                        changed_since_checkpoint = 0
 
                 yielded += 1
                 if pbar:
@@ -354,7 +385,7 @@ def build_remote_index_v2(
                     return out
 
         if yielded and (yielded % 100 == 0):
-            print(f"[remote] processed {yielded} decisions...")
+            print(f"[{mode}] processed {yielded} decisions...")
 
         start += len(results)
 
@@ -365,7 +396,26 @@ def build_remote_index_v2(
     if pbar:
         pbar.close()
 
+    if checkpoint_path:
+        write_json_atomic(checkpoint_path, out)
+
     return out
+
+
+def build_remote_index_v2(
+    client: HttpClient,
+    *,
+    do_head: bool = True,
+    head_only_assets: bool = True,
+    max_items: Optional[int] = None,
+) -> Dict[str, Dict[str, Any]]:
+    return build_remote_index(
+        client,
+        mode="EAT",
+        do_head=do_head,
+        head_only_assets=head_only_assets,
+        max_items=max_items,
+    )
 
 
 def _env_int(name: str, default: int) -> int:
@@ -376,13 +426,3 @@ def _env_int(name: str, default: int) -> int:
         return int(v)
     except Exception:
         return default
-
-
-# -----------------------------
-# JSON helpers
-# -----------------------------
-def write_json(path: str | Path, obj: Any) -> None:
-    p = Path(path).expanduser().resolve()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
