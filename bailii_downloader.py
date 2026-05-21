@@ -46,6 +46,7 @@ class BailiiConfig:
     end_year: int = 2026
     root_dir: Optional[Path] = None
     max_threads: int = 20
+    max_cases_per_year: Optional[int] = None
     max_retries: int = 4
     timeout: int = 20
     sleep_min: float = 0.05
@@ -68,6 +69,8 @@ class BailiiConfig:
         if self.root_dir is None:
             self.root_dir = DEFAULT_ROOTS[self.mode]
         self.root_dir = Path(self.root_dir).expanduser().resolve()
+        if self.max_cases_per_year is not None and self.max_cases_per_year < 1:
+            raise ValueError("max_cases_per_year must be at least 1 when set")
 
     @property
     def base_path(self) -> str:
@@ -80,6 +83,37 @@ class BailiiConfig:
     @property
     def failed_urls_path(self) -> Path:
         return self.root_dir / f"{self.mode.lower()}_bailii_failed_urls.json"
+
+
+def summarize_bailii_root(mode: str, root_dir: Optional[Path] = None) -> Dict[str, Any]:
+    mode = mode.upper()
+    if mode not in BAILII_PATHS:
+        raise ValueError("mode must be 'EAT' or 'ET'")
+
+    root = Path(root_dir or DEFAULT_ROOTS[mode]).expanduser().resolve()
+    manifest_path = root / f"{mode.lower()}_bailii_manifest.json"
+    failed_urls_path = root / f"{mode.lower()}_bailii_failed_urls.json"
+
+    years = sorted(path.name for path in root.iterdir() if path.is_dir()) if root.exists() else []
+    html_count = sum(1 for _ in root.glob("*/*.html")) if root.exists() else 0
+    text_count = sum(1 for _ in root.glob("*/*.txt")) if root.exists() else 0
+    manifest = load_json(manifest_path, default={})
+    failed_urls = load_json(failed_urls_path, default=[])
+
+    return {
+        "mode": mode,
+        "root_dir": str(root),
+        "exists": root.exists(),
+        "year_start": years[0] if years else None,
+        "year_end": years[-1] if years else None,
+        "year_dirs": len(years),
+        "html_files": html_count,
+        "text_files": text_count,
+        "manifest_path": str(manifest_path),
+        "manifest_records": len(manifest) if isinstance(manifest, dict) else 0,
+        "failed_urls_path": str(failed_urls_path),
+        "failed_urls": len(failed_urls) if isinstance(failed_urls, list) else 0,
+    }
 
 
 class BailiiDownloader:
@@ -101,6 +135,8 @@ class BailiiDownloader:
         print(f"[{cfg.mode}] Failed path   : {cfg.failed_urls_path}")
         print(f"[{cfg.mode}] Years         : {cfg.start_year} -> {cfg.end_year}")
         print(f"[{cfg.mode}] Max threads   : {cfg.max_threads}")
+        if cfg.max_cases_per_year:
+            print(f"[{cfg.mode}] Max cases/year: {cfg.max_cases_per_year}")
 
         manifest = load_json(cfg.manifest_path, default={})
         failed_urls = load_json(cfg.failed_urls_path, default=[])
@@ -130,6 +166,14 @@ class BailiiDownloader:
 
             case_urls = self.extract_case_links(index_html, year)
             print(f"[{cfg.mode}] {year}: found {len(case_urls)} candidate case URLs")
+
+            if cfg.max_cases_per_year is not None:
+                original_count = len(case_urls)
+                case_urls = case_urls[: cfg.max_cases_per_year]
+                print(
+                    f"[{cfg.mode}] {year}: smoke cap selected "
+                    f"{len(case_urls)}/{original_count} case URLs"
+                )
 
             if not case_urls:
                 print(f"[{cfg.mode}] {year}: no case URLs found")
@@ -427,15 +471,38 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--start-year", type=int, default=2022)
     parser.add_argument("--end-year", type=int, default=2026)
     parser.add_argument("--root-dir", type=Path, default=None)
-    parser.add_argument("--max-threads", type=int, default=20)
+    parser.add_argument("--max-threads", type=int, default=None)
+    parser.add_argument("--max-cases-per-year", type=int, default=None)
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Run one thread and process only a few cases per year.",
+    )
+    parser.add_argument("--sleep-min", type=float, default=None)
+    parser.add_argument("--sleep-max", type=float, default=None)
     args = parser.parse_args(argv)
+
+    max_cases_per_year = args.max_cases_per_year
+    if args.smoke_test and max_cases_per_year is None:
+        max_cases_per_year = 3
 
     run_bailii_download(
         mode=args.mode,
         start_year=args.start_year,
         end_year=args.end_year,
         root_dir=args.root_dir,
-        max_threads=args.max_threads,
+        max_threads=args.max_threads or (1 if args.smoke_test else 20),
+        max_cases_per_year=max_cases_per_year,
+        sleep_min=(
+            args.sleep_min
+            if args.sleep_min is not None
+            else (5.0 if args.smoke_test else 0.05)
+        ),
+        sleep_max=(
+            args.sleep_max
+            if args.sleep_max is not None
+            else (10.0 if args.smoke_test else 0.20)
+        ),
     )
 
 

@@ -127,6 +127,7 @@ def download_missing_and_changed(
         results["failed"] = []
 
     already_done = {Path(p).name for p in results.get("downloaded", [])}
+    already_failed = {item["filename"] for item in results.get("failed", [])}
 
     plan = build_download_plan(delta)
     if max_items is not None:
@@ -136,7 +137,7 @@ def download_missing_and_changed(
     pbar = tqdm(plan, desc="Downloading PDFs", unit="file", total=len(plan))
 
     for kind, slug, filename, url in pbar:
-        if filename in already_done:
+        if filename in already_done or filename in already_failed:
             continue
 
         dest = eat_dir / filename
