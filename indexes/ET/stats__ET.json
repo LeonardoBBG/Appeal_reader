@@ -1,22 +1,22 @@
 {
   "mode": "ET",
   "pdf_root": "/media/hello/Vault/Tribunals/ET_Cases",
-  "total_pdfs": 130919,
-  "text_ok": 130918,
+  "total_pdfs": 133236,
+  "text_ok": 133235,
   "text_fail": 1,
   "hits": {
-    "UNFAIR_DISMISSAL": 28759,
-    "CONSTRUCTIVE_DISMISSAL": 1480,
-    "WRONGFUL_DISMISSAL": 3459,
-    "WHISTLEBLOWING_PIDA": 3154,
-    "DISCRIMINATION": 21672,
-    "REDUNDANCY": 10718,
-    "TUPE": 1110
+    "UNFAIR_DISMISSAL": 29532,
+    "CONSTRUCTIVE_DISMISSAL": 1518,
+    "WRONGFUL_DISMISSAL": 3548,
+    "WHISTLEBLOWING_PIDA": 3277,
+    "DISCRIMINATION": 22238,
+    "REDUNDANCY": 10947,
+    "TUPE": 1137
   },
   "first_n_pages": 2,
   "max_workers": 16,
   "labels_path": "/home/hello/Projects/Appeal_reader/indexes/ET/labels__ET.jsonl",
   "fails_path": "/home/hello/Projects/Appeal_reader/indexes/ET/failures__ET.jsonl",
   "cache_path": "/home/hello/Projects/Appeal_reader/indexes/ET/cache__ET.json",
-  "elapsed_s": 93.94
+  "elapsed_s": 3.16
 }

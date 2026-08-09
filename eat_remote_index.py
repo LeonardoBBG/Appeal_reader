@@ -12,7 +12,7 @@ from urllib.parse import quote, urljoin, urlparse
 
 import requests
 
-from json_utils import write_json, write_json_atomic
+from json_utils import load_json, write_json, write_json_atomic
 
 
 # -----------------------------
@@ -272,12 +272,28 @@ def build_remote_index(
     existing_index: Optional[Dict[str, Dict[str, Any]]] = None,
     checkpoint_path: str | Path | None = None,
     checkpoint_every: int = 200,
+    stop_when_caught_up: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Build a slug-keyed GOV.UK decision index via Search API + Content API.
 
     Supports EAT and ET; per-result Content API GET and optional PDF HEAD
     requests run in a thread pool, while Search API pagination stays sequential.
+
+    Results are paginated newest-first (order=-public_timestamp). When resuming
+    from an existing_index that was itself built by a *complete* prior run
+    (not cut short by max_items) and stop_when_caught_up is True, pagination
+    stops as soon as a full page yields zero new slugs, since every slug on
+    every subsequent (older) page is guaranteed to already be indexed. This
+    avoids re-walking the entire remote catalog on every incremental run.
+
+    Completeness is tracked via a small sidecar file next to checkpoint_path
+    (written only when a run finishes without being cut short by max_items).
+    This guards against the case where existing_index came from a max_items-
+    limited smoke test: such an index is only a partial, truncated prefix, so
+    early-exit must stay off until a full run actually completes and records
+    itself as complete — otherwise older, never-yet-visited items would be
+    silently and permanently skipped.
     """
     mode = mode.upper()
     court_cfg = get_decision_config(mode)
@@ -285,6 +301,14 @@ def build_remote_index(
     base_path = court_cfg["base_path"]
     out: Dict[str, Dict[str, Any]] = dict(existing_index or {})
     existing_slugs = set(out)
+
+    state_path: Optional[Path] = (
+        Path(checkpoint_path).with_name(Path(checkpoint_path).name + ".state.json")
+        if checkpoint_path
+        else None
+    )
+    prior_complete = bool(load_json(state_path, default={}).get("complete")) if state_path else False
+    resuming = bool(existing_slugs) and prior_complete
 
     if max_workers is None:
         env_name = f"{mode}_INDEX_MAX_WORKERS"
@@ -361,6 +385,8 @@ def build_remote_index(
             total = payload.get("total")
             pbar = tqdm(total=total, desc=f"Indexing {mode}", unit="doc")
 
+        new_in_page = 0
+
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(_build_one, r) for r in results]
 
@@ -370,6 +396,7 @@ def build_remote_index(
                     slug, rec = item
                     out[slug] = rec
                     changed_since_checkpoint += 1
+                    new_in_page += 1
 
                     if checkpoint_path and changed_since_checkpoint >= checkpoint_every:
                         write_json_atomic(checkpoint_path, out)
@@ -382,10 +409,19 @@ def build_remote_index(
                 if max_items is not None and yielded >= max_items:
                     if pbar:
                         pbar.close()
+                    if checkpoint_path:
+                        write_json_atomic(checkpoint_path, out)
                     return out
 
         if yielded and (yielded % 100 == 0):
             print(f"[{mode}] processed {yielded} decisions...")
+
+        if stop_when_caught_up and resuming and new_in_page == 0:
+            print(
+                f"[{mode}] caught up to existing index at start={start} "
+                f"(page had 0 new slugs); stopping early"
+            )
+            break
 
         start += len(results)
 
@@ -398,6 +434,11 @@ def build_remote_index(
 
     if checkpoint_path:
         write_json_atomic(checkpoint_path, out)
+        # Reached here without a max_items cutoff, so the full remote catalog
+        # (as of `total` at loop start) is now accounted for in `out`. Record
+        # that so future runs are allowed to use the early-exit fast path.
+        if state_path:
+            write_json_atomic(state_path, {"complete": True})
 
     return out
 

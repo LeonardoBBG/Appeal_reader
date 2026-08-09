@@ -1,15 +1,15 @@
 {
   "mode": "EAT",
   "pdf_root": "/media/hello/Vault/Tribunals/EAT_Appeals",
-  "total_pdfs": 2553,
-  "text_ok": 2552,
+  "total_pdfs": 2598,
+  "text_ok": 2597,
   "text_fail": 1,
   "hits": {
-    "UNFAIR_DISMISSAL": 210,
-    "CONSTRUCTIVE_DISMISSAL": 21,
-    "WRONGFUL_DISMISSAL": 19,
-    "WHISTLEBLOWING_PIDA": 68,
-    "DISCRIMINATION": 385,
+    "UNFAIR_DISMISSAL": 222,
+    "CONSTRUCTIVE_DISMISSAL": 23,
+    "WRONGFUL_DISMISSAL": 21,
+    "WHISTLEBLOWING_PIDA": 70,
+    "DISCRIMINATION": 405,
     "REDUNDANCY": 51,
     "TUPE": 14
   },
@@ -18,5 +18,5 @@
   "labels_path": "/home/hello/Projects/Appeal_reader/indexes/EAT/labels__EAT.jsonl",
   "fails_path": "/home/hello/Projects/Appeal_reader/indexes/EAT/failures__EAT.jsonl",
   "cache_path": "/home/hello/Projects/Appeal_reader/indexes/EAT/cache__EAT.json",
-  "elapsed_s": 2.63
+  "elapsed_s": 0.22
 }

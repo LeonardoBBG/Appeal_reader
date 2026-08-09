@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import shutil
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -101,12 +103,17 @@ def download_missing_and_changed(
     archive_subdir: str = "archive",
     cfg: Optional[DownloadConfig] = None,
     max_items: Optional[int] = None,
+    max_workers: int = 8,
+    checkpoint_every: int = 20,
 ) -> Dict[str, Any]:
     """
-    Downloads delta['missing'] and delta['changed'] into eat_dir.
+    Downloads delta['missing'] and delta['changed'] into eat_dir, in parallel
+    (max_workers concurrent downloads; each file still respects cfg.min_delay).
     For 'changed', optionally archives existing file into eat_dir/archive/ with timestamp.
-    Checkpoints after each success/failure to out_dir/<checkpoint_name> (atomic write).
-    Resumes by skipping filenames already in checkpoint['downloaded'].
+    Checkpoints to out_dir/<checkpoint_name> (atomic write) every checkpoint_every
+    completions, plus once more at the end, so at most checkpoint_every already-
+    downloaded files would be redundantly retried if interrupted mid-run.
+    Resumes by skipping filenames already in checkpoint['downloaded'] or ['failed'].
     """
     cfg = cfg or DownloadConfig()
 
@@ -119,12 +126,9 @@ def download_missing_and_changed(
 
     # Resume state
     results = load_json(checkpoint_path, default={}) or {"downloaded": [], "archived": [], "failed": []}
-    if "downloaded" not in results:
-        results["downloaded"] = []
-    if "archived" not in results:
-        results["archived"] = []
-    if "failed" not in results:
-        results["failed"] = []
+    for key in ("downloaded", "archived", "failed"):
+        if key not in results:
+            results[key] = []
 
     already_done = {Path(p).name for p in results.get("downloaded", [])}
     already_failed = {item["filename"] for item in results.get("failed", [])}
@@ -133,38 +137,67 @@ def download_missing_and_changed(
     if max_items is not None:
         plan = plan[:max_items]
 
-    # tqdm total reflects planned actions (files)
-    pbar = tqdm(plan, desc="Downloading PDFs", unit="file", total=len(plan))
+    pending = [
+        (kind, slug, filename, url)
+        for kind, slug, filename, url in plan
+        if filename not in already_done and filename not in already_failed
+    ]
+    already_settled = len(plan) - len(pending)
 
-    for kind, slug, filename, url in pbar:
-        if filename in already_done or filename in already_failed:
-            continue
+    lock = threading.Lock()
+    pending_writes = 0
 
+    def _checkpoint(force: bool = False) -> None:
+        nonlocal pending_writes
+        with lock:
+            pending_writes += 1
+            if force or pending_writes >= checkpoint_every:
+                write_json_atomic(checkpoint_path, results)
+                pending_writes = 0
+
+    def _process_one(kind: str, slug: str, filename: str, url: str) -> None:
         dest = eat_dir / filename
 
-        try:
-            if kind == "changed" and archive_changed and dest.exists():
-                archived = _archive_existing(dest, archive_dir, slug)
-                if archived:
+        if kind == "changed" and archive_changed and dest.exists():
+            archived = _archive_existing(dest, archive_dir, slug)
+            if archived:
+                with lock:
                     results["archived"].append(str(archived))
-                    write_json_atomic(checkpoint_path, results)
 
-            _download_file(url, dest, cfg)
+        _download_file(url, dest, cfg)
+
+        with lock:
             results["downloaded"].append(str(dest))
-            write_json_atomic(checkpoint_path, results)
 
-            already_done.add(filename)
+    # tqdm total reflects planned actions; already-settled files count as pre-done
+    pbar = tqdm(total=len(plan), initial=already_settled, desc="Downloading PDFs", unit="file")
 
-        except Exception as e:
-            results["failed"].append(
-                {
-                    "kind": kind,
-                    "slug": slug,
-                    "filename": filename,
-                    "url": url,
-                    "error": str(e),
-                }
-            )
-            write_json_atomic(checkpoint_path, results)
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as ex:
+            futures = {
+                ex.submit(_process_one, kind, slug, filename, url): (kind, slug, filename, url)
+                for kind, slug, filename, url in pending
+            }
+
+            for fut in as_completed(futures):
+                kind, slug, filename, url = futures[fut]
+                try:
+                    fut.result()
+                except Exception as e:
+                    with lock:
+                        results["failed"].append(
+                            {
+                                "kind": kind,
+                                "slug": slug,
+                                "filename": filename,
+                                "url": url,
+                                "error": str(e),
+                            }
+                        )
+                pbar.update(1)
+                _checkpoint()
+    finally:
+        _checkpoint(force=True)
+        pbar.close()
 
     return results

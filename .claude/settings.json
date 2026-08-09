@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -m 15 \"https://www.gov.uk/api/search.json?filter_document_type=employment_tribunal_decision&count=1\")",
+      "Bash(curl -s -m 15 \"https://www.gov.uk/api/search.json?filter_document_type=employment_appeal_tribunal_decision&count=1\")"
+    ]
+  }
+}
